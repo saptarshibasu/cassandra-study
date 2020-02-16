@@ -37,54 +37,66 @@
 * To split a large partition, add an additional column to the partition key. E.g. if the partition key is "year", all data of a given year will end up in a single partitions. If "month" column is also added in the partition key, each partition will contain only a month's worth of data
 * Cassandra treats each new row as an upsert: if the new row has the same primary key as that of an existing row, Cassandra processes it as an update to the existing row
 * Cassandra is optimized for high write throughput, and almost all writes are equally efficient. If you can perform extra writes to improve the efficiency of your read queries, it's almost always a good tradeoff. Reads tend to be more expensive and are much more difficult to tune
+* Cassandra provides 3 in-built repair mechanisms which are explained in detail in the subsequen sections:
+  * Hinted-handoff
+  * Read-repair
+  * Anti-entropy node repair
+* In Cassandra all writes to SSTables including SSTable compaction are sequential and hence writes perform so well in Cassandra
+* The key values in configurig a cluster are the cluster ame, the partitioner, the snitch, and the seed nodes
 
 ## Architecture
 
 ### Storage
 
-* When a write occurs, Cassandra first appends the write to a commitlog segment on the disk for durability and then writes the data to a memory structure called memtable
-* Commitlogs have size-bound segments. Once the size limit is reached a new segment is created
-* Commitlog segments are truncated when Cassandra has flushed data - older than a certain point - from the memtables to the SSTables on the disk
-* If a node stops working, commit log is replayed to restore the last state of the memtables
-* To reduce the commit log replay time, the recommended best practice is to flush the memtable before restarting the nodes
+* When a write occurs, Cassandra first appends the write to a **commit log** segment on the disk for durability and then writes the data to a memory structure called **memtable**
+* **Commit logs** have size-bound segments. Once the size limit is reached a new segment is created
+* **Commit log** segments are truncated when Cassandra has flushed data - older than a certain point - from the memtables to the SSTables on the disk
+* If a node stops working, **commit log** is replayed to restore the last state of the **memtables**
+* To reduce the **commit log** replay time, the recommended best practice is to flush the **memtables** before restarting the nodes
 * `commitlog_sync` setting determines when the data on the commitlog will be `fsync`ed to the disk. Possible values:
   * `batch` (default) - Cassandra won’t ack writes to the clients until the commit log has been `fsync`ed to the disk. It will wait `commitlog_sync_batch_window_in_ms` milliseconds between `fsync`s. Default value is 2 milliseconds
   * `periodic` - Writes are immediately ack’ed to the clients, and the Commitlog is simply synced every `commitlog_sync_period_in_ms` milliseconds. Default value is 10 seconds
-* Commitlogs should go in a separate device in `batch` mode
-* Memtables are automatically flushed to SSTables in two scenarios
-  * The memory usage exceeds a configurable limit. The memtable is written out to a new SSTable
-  * The commitlog size on disk exceeds a certain threshold. All dirty column families present in the oldest segment will be flushed from memtable to SSTable. The segment will then be removed
-* Memtables and SSTables are maintained per table
-* The commit log is shared among tables
-* SSTables are immutable and cannot be written to after the memtable is flushed
-* Each SSTable is comprised of:
-  * Data (data.db) - The actual data i.e. the content of rows
-  * Primary Index (index.db) - An index from partition keys to positions in the Data.db file. For wide partitions, this may also include an index to rows within a partition
-  * Bloom Filter (Filter.db) - A Bloom Filter of the partition keys in the SSTable
-  * Compression Information (Compressioninfo.db) - Metadata about the offsets and lengths of compression chunks in the Data.db file
-  * Statistics (Statistics.db) - Stores metadata about the SSTable, including information about timestamps, tombstones, clustering keys, compaction, repair, compression, TTLs, and more
-  * Digest (Digest.crc32, Digest.adler32, Digest.sha1) - A CRC-32 digest of the Data.db file
-  * CRC (CRC.db)
-  * SSTable Index Summary (SUMMARY.db) - A sampling of (by default) every 128th entry in the Index.db file
-  * SSTable Table of Contents (TOC.txt) - A plain text list of the component files for the SSTable
-  * Secondary Index (SI_.*.db)
+* **Commit logs** should go in a separate device in `batch` mode
+* **Memtables** are automatically flushed to **SSTables** in two scenarios
+  * The memory usage exceeds a configurable limit. The **memtable** is written out to a new **SSTable**
+  * The **commit log** size on disk exceeds a certain threshold. All dirty column families present in the oldest segment will be flushed from **memtable** to **SSTable**. The segment will then be removed
+* **Memtables** and **SSTables** are maintained per table
+* The **commit log** is shared among tables
+* **SSTables** are immutable and cannot be written to after the **memtable** is flushed
+* Each **SSTable** is comprised of:
+  * Data (**data.db**) - The actual data i.e. the content of rows
+  * Primary Index (**index.db**) - An index from partition keys to positions in the Data.db file. For wide partitions, this may also include an index to rows within a partition
+  * Bloom Filter (**Filter.db**) - A Bloom Filter of the partition keys in the SSTable
+  * Compression Information (**Compressioninfo.db**) - Metadata about the offsets and lengths of compression chunks in the Data.db file
+  * Statistics (**Statistics.db**) - Stores metadata about the SSTable, including information about timestamps, tombstones, clustering keys, compaction, repair, compression, TTLs, and more
+  * Digest (**Digest.crc32, Digest.adler32, Digest.sha1**) - A CRC-32 digest of the Data.db file
+  * CRC (**CRC.db**)
+  * SSTable Index Summary (**SUMMARY.db**) - A sampling of (by default) every 128th entry in the Index.db file
+  * SSTable Table of Contents (**TOC.txt**) - A plain text list of the component files for the SSTable
+  * Secondary Index (**SI_.*.db**)
 * Within the Data.db file, rows are organized by partition. These partitions are sorted in token order (i.e. by a hash of the partition key when the default partitioner, Murmur3Partition, is used). Within a partition, rows are stored in the order of their clustering keys
+* **Commit log** has a bit for each table to indicate whether the commit log contains any dirty data that is yet to be flushed to **SSTable**. As the **memtables** are flushed to **SSTables**, the corresponding bits are reset
 
-To keep the database healthy, Cassandra periodically merges SSTables and discards old data. This process is called compaction.
-Compaction works on a collection of SSTables. From these SSTables, compaction collects all versions of each unique row and assembles one complete row, using the most up-to-date version (by timestamp) of each of the row's columns. The merge process is performant, because rows are sorted by partition key within each SSTable, and the merge process does not use random I/O. The new versions of each row is written to a new SSTable. The old versions, along with any rows that are ready for deletion, are left in the old SSTables, and are deleted as soon as pending reads are completed.
+### Seed Nodes
+
+* When new nodes in a cluster come online, seed nodes are their contact points for learning the cluster topology. This process is called **auto bootstrapping**
 
 ### Tomb Stone
 
-* On deletion, Cassandra marks the data with a tombstone
-* Garbage Collection Grace Seconds (default values - 10 days) must expire before the compaction process can garbage collect the tobstone and the associated data
-* The Garbage Collection Grace Seconds setting allows the nodes that failed before receiving the delete operation to recover. Otherwise, the deleted data may resurrect in the node
-* Any node that remains down for Garbage Collection Grace Seconds is considered as failed and hence replaced
-* Each table can have its own value for Garbage Collection Grace Seconds
+* On deletion, Cassandra marks the data with a **tombstone**
+* **Garbage Collection Grace Seconds** (default values - 10 days) must expire before the compaction process can garbage collect the tobstone and the associated data
+* The **Garbage Collection Grace Seconds** setting allows the nodes that failed before receiving the delete operation to recover. Otherwise, the deleted data may resurrect in the node
+* Any node that remains down for **Garbage Collection Grace Seconds** is considered as failed and hence replaced
+* Each table can have its own value for **Garbage Collection Grace Seconds**
 
 ### Compaction
 
-* Compaction is the process of merging SSTables for a given table and discard old and obsolete data
-* Once the merge is complete, old SSTables are dropped
+* Compaction is the process of merging **SSTables** for a given table and discard old and obsolete data keeping the data with the ltest timestamp
+* Once the merge is complete, old **SSTables** are ready to be deleted and are dropped as soon as the pending reads are completed
+* Advantages
+  * It frees up disk space by merging multiple SSTables and discarding obsolete date
+  * It improves performance as less dis seek is required to read data
+* The merge process doesn't use random I/O  
 * **Compaction Strategies** -
   * **SizeTieredCompactionStrategy (STCS)** - Recommended for write-intensive workloads (default)
   * **LeveledCompactionStrategy (LCS)** - Recommended for read-intensive workloads
@@ -92,7 +104,7 @@ Compaction works on a collection of SSTables. From these SSTables, compaction co
 
 ### Snitch
 
-* Snitch provides information about the network topology:
+* **Snitch** provides information about the network topology:
   * To route requests efficiently
   * To spread replicas around across “datacenters” and “racks” for better fault tolerance
 * The replication strategy places the replicas based on the information provided by the snitch
@@ -156,9 +168,24 @@ Compaction works on a collection of SSTables. From these SSTables, compaction co
 
 ### Write Path
 
-* The client connects to any node which becomes the co-ordinator node for the write operation
-* The co-ordinator node contacts all replicas based on replication factor and consistency level
-* 
+* The client connects to any node which becomes the coordinator node for the write operation
+* The coordinator node uses the partitioner to identify which nodes in the cluster are replicas, according to the replication factor of the keyspace
+* The coordinator node may itself be a replica, especially if the client is using a token-aware driver
+* If the coordinator knows there is not enough replica to meet the consistency level, it returns an error immediately
+* The coordinator node sends simultaneous write requests to all replicas for the data being written. This ensures that all nodes will get the write as long as they are up
+* Nodes that are down won't have consistent data, but they will be repaired by one of the anti-entropy mechanisms: hinted handoff, read repair, or anti-entropy repair
+* If the cluster spans multiple data centers, the local coordinator node selects a remote coordinator in each of the other data centers to coordinate the write to the replicas in that data center
+* Each of the remote replicas respond directly to the original coordinator node
+* The coordinator waits for the replicas to respond
+* Once a sufficient number of replicas have responded to satisfy the consistency level, the coordinator acknowledges the write to the client
+* If a replica doesn't respond within the timeout, it is presumed to be dead and a hint is stored for the write
+* A hint doesn't count as a succesful replica write, unless the consistency level is ANY
+* As the replica node receives the write request, it immediately writes the data to the commit log
+* Next the replica node writes the data to a memtable
+* If the row caching is used and the eow is in the cache, it is invalidated
+* If the write causes either the commit log or memtable to pass their maximum thresholds, a flush is scheduled to run
+* After responding to the client, the node executes a flush if one was scheduled
+* After the flush is complete, additional tasks are scheduled to check if compaction is necessary and then schedule the compaction, if necessary
 
 ### Failure Detection
 
@@ -172,6 +199,19 @@ Compaction works on a collection of SSTables. From these SSTables, compaction co
   * A gossip message has a version associated with it, so that during a gossip exchange, older information is overwritten with the most current state for a particular node
 * Each node keeps track of the state of other nodes in the cluster by means of an accrual failure detector (or phi failure detector). This detector evaluates the health of other nodes based on a sliding window of gossip
 * Making every node a seed node is not recommended because of increased maintenance and reduced gossip performance. Gossip optimization is not critical, but it is recommended to use a small seed list (approximately three nodes per datacenter)
+
+### Read Repair
+
+* Cassandra reads data from multiple replicas to acheive the required level of consistency level
+* If an insufficient number of nodes have the latest value, a read repair is performed immediately to update the out of date replicas
+* Otherwise, the replicas can be repaired in the background after the read returns
+
+### Anti Entropy Node Repair
+
+* Anti Entropy Repair is a manually initiated repair operation performed as a part of regular maintenance process
+* It is based on Merkle tree
+* Each table has its own Merkle tree which is created during a major compaction
+
 
 ## Operations
 
@@ -218,10 +258,7 @@ Cassandra write and delete operations are performed with full row-level isolatio
 Consistent hashing allows distribution of data across a cluster to minimize reorganization when nodes are added or removed
 
 
-3 built-in repair mechanisms:
-- hinted-handoff
-- read-repair
-- anti-entropy node repair
+
 
 For read requests, the replicas as required by the consistency level must respond. Other replicas will be checked for consistency in the background. Read repair will be done in the background if required
 
