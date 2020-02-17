@@ -164,6 +164,17 @@
 
 ### Read Path
 
+* The client connects to any node which becomes the coordinator node for the read operation
+* The coordinator node uses the partitioner to identify which nodes in the cluster are replicas, according to the replication factor of the keyspace
+* The coordinator node may itself be a replica, especially if the client is using a token-aware driver
+* If the coordinator knows there is not enough replica to meet the consistency level, it returns an error immediately
+* If the cluster spans multiple data centers, the local coordinator selects a remote coordinator in each of the other data centers
+* If the coordinator is not itself a replica, it sends a read request to the fatest replica as determined by the dynamic snitch
+* The coordinator node also sends a digest request to the other replicas
+* A digest request is similar to a standard read request, except the replicas return a digest, or hash, of the requested data
+* The coordinator calculates the digest hash for the data returned from the fastest replica and compares it to the digests returned from the other replicas
+* If the digests are consistent, and the desired consistency level has been met, then the data from the fastest replica can be returned
+* If the digests are not consistent, then the coordinator must perform a read repair
 
 
 ### Write Path
@@ -202,9 +213,15 @@
 
 ### Read Repair
 
-* Cassandra reads data from multiple replicas to acheive the required level of consistency level
-* If an insufficient number of nodes have the latest value, a read repair is performed immediately to update the out of date replicas
-* Otherwise, the replicas can be repaired in the background after the read returns
+* The coordinator makes a full read request from all the replica nodes
+* The coordinator merges the data by selecting a value for each requested column
+* It compares the values returned from the replicas and returns the value that has the latest timestamp
+* If Cassandra finds different values stored with the same timestamp, it will compare the values lexicographically and choose the one that has the greater value
+* The merged data is then returned to the client
+* Asnchronously, the coordinator identifies any replicas that return obsolete data and issues a read repair request to each of these replicas to update their data based on the merged data
+* The read repair may be performed either before or after the return to the client
+* If one of the two stronger consistency levels (QUORUM & ALL) is used, the read repair happens before the data is returned to the client
+* If a weaker consistency level is used like ONE, the read repair is optionally performed in the background after returning the data to the client
 
 ### Anti Entropy Node Repair
 
