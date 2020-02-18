@@ -76,6 +76,20 @@
   * Secondary Index (**SI_.*.db**)
 * Within the Data.db file, rows are organized by partition. These partitions are sorted in token order (i.e. by a hash of the partition key when the default partitioner, Murmur3Partition, is used). Within a partition, rows are stored in the order of their clustering keys
 * **Commit log** has a bit for each table to indicate whether the commit log contains any dirty data that is yet to be flushed to **SSTable**. As the **memtables** are flushed to **SSTables**, the corresponding bits are reset
+* Compression is enabled by default even though going through the compression offset map consumes CPU resources. Having compression enabled makes the page cache more effective, and typically, almost always pays off
+
+
+| Storage Engine Items   | Storage Type       |
+| ---------------------- | ------------------ |
+| Key Cache              | Heap               |
+| Row Cache              | Off-heap           |
+| Bloom Filter           | Off-heap           |
+| Partition Key Cache    | Off-heap           |
+| Partition Summary      | Off-heap           |
+| Partition Index        | Disk               |
+| Compression Offset Map | Off-heap           |
+| MemTable               | Partially off-heap |
+| SSTable                | Disk               |
 
 ### Seed Nodes
 
@@ -181,10 +195,12 @@
 * As there can be many SSTables per table and each may contain a portion of the data, Cassandra follows the following approach
   * Cassandra checks the bloom filter to find out the SSTables that do NOT contain the requested partition
   * Cassandra checks the key cache to get the offset of the partition key in the SSTable. Key cache is implemented as a map structure in which the keys are a combination of the SSTable file descriptor and partition key and the values are offset locations into SSTable files
+  * If the partition key is found in the partition cache, Cassandra directly goes the compression offset map to locate the data on disk
   * If the offset is not obtained from the key cache, Cassandra uses a two-level index stored on disk in order to locate the offset:
     * The first level index is the partition summary, which is used to obtain an offset for searching for the partition key within the second level index, the partition index
-    * The partition index is where the offset into the SSTable for the partition key is stored
-  * If the offset is obtained, Cassandra reads the data from the SSTable at the specified offset
+    * The partition index is where the offset for the partition key is stored
+  * If the partition key offset is obtained, Cassandra retrieves the actual offset in the SSTable from the compression offset map 
+  * Finally Cassandra reads the data from the SSTable at the specified offset
   * Once data has been obtained from all of the SSTables, Cassandra merges the SSTable data and memtable data by selecting the value with the latest timestamp for each requested column. Any tombstones are ignored
   * Finally the merged data can be added to the row cache (if enabled) and returned to the client or coordinator node
 
@@ -204,7 +220,7 @@
 * A hint doesn't count as a succesful replica write, unless the consistency level is ANY
 * As the replica node receives the write request, it immediately writes the data to the commit log
 * Next the replica node writes the data to a memtable
-* If the row caching is used and the eow is in the cache, it is invalidated
+* If the row caching is used and the row is in the cache, it is invalidated
 * If the write causes either the commit log or memtable to pass their maximum thresholds, a flush is scheduled to run
 * After responding to the client, the node executes a flush if one was scheduled
 * After the flush is complete, additional tasks are scheduled to check if compaction is necessary and then schedule the compaction, if necessary
@@ -243,24 +259,6 @@
 
 ## Operations
 
-Read path
-Check the memtable
-Check row cache, if enabled
-Checks Bloom filter
-Checks partition key cache, if enabled
-Goes directly to the compression offset map if a partition key is found in the partition key cache, or checks the partition summary if not
-If the partition summary is checked, then the partition index is accessed
-Locates the data on disk using the compression offset map
-Fetches the data from the SSTable on disk
-
-If the memtable has the desired partition data, then the data is read and then merged with the data from the SSTables
-In Cassandra 2.2 and later, row cache is stored in fully off-heap memory using a new implementation that relieves garbage collection pressure in the JVM
-The operating system page cache is best at improving performance, although the row cache can provide some improvement for very read-intensive operations, where read operations are 95% of the load
-The row cache is not write-through. If a write comes in for the row, the cache for that row is invalidated and is not cached again until the row is read
-The row cache uses LRU (least-recently-used) eviction to reclaim memory when the cache has filled up
-The Bloom filter is stored in off-heap memory
-Each SSTable has a Bloom filter associated with it. A Bloom filter can establish that a SSTable does not contain certain partition data
-If the Bloom filter does not rule out an SSTable, Cassandra checks the partition key cache
 The Bloom filter grows to approximately 1-2 GB per billion partitions
 The partition key cache, if enabled, stores a cache of the partition index in off-heap memory
 If a partition key is found in the key cache can go directly to the compression offset map to find the compressed block on disk that has the data
@@ -271,33 +269,14 @@ After finding the range of possible partition key values, the partition index is
 The partition index resides on disk and stores an index of all partition keys mapped to their offset
 Using the information found, the partition index now goes to the compression offset map to find the compressed block on disk that has the data. If the partition index must be searched, two seeks to disk will be required to find the desired data
 The compression offset map stores pointers to the exact location on disk that the desired partition data will be found. It is stored in off-heap memory and is accessed by either the partition key cache or the partition index. The desired compressed partition data is fetched from the correct SSTable(s) once the compression offset map identifies the disk location.
-Compression is enabled by default even though going through the compression offset map consumes CPU resources. Having compression enabled makes the page cache more effective, and typically, almost always pays off
 Cassandra extends the concept of eventual consistency by offering tunable consistency
 Write operations will use hinted handoffs to ensure the writes are completed when replicas are down or otherwise not responsive to the write request
-Typically, a client specifies a consistency level that is less than the replication factor specified by the keyspace
-Strong consistency can be guaranteed when the following condition is true:R + W > N where
-- R is the consistency level of read operations
-- W is the consistency level of write operations
-- N is the number of replicas
 In Cassandra, a write operation is atomic at the partition level
 Cassandra uses client-side timestamps to determine the most recent update to a column
 The latest timestamp always wins when requesting data, so if multiple client sessions update the same columns in a row concurrently, the most recent update is the one seen by readers.
 Cassandra write and delete operations are performed with full row-level isolation. This means that a write to a row within a single partition on a single node is only visible to the client performing the operation – the operation is restricted to this scope until it is complete. All updates in a batch operation belonging to a given partition key have the same restriction
 Consistent hashing allows distribution of data across a cluster to minimize reorganization when nodes are added or removed
-
-
-
-
-For read requests, the replicas as required by the consistency level must respond. Other replicas will be checked for consistency in the background. Read repair will be done in the background if required
-
 If the table has been configured with the speculative_retry property, the coordinator node for the read request will retry the request with another replica node if the original replica node exceeds a configurable timeout value to complete the read request
 
-There are three types of read requests that a coordinator can send to a replica:
-
-A direct read request
-
-A digest request
-
-A background read repair request
 
 
