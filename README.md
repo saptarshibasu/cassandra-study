@@ -175,7 +175,18 @@
 * The coordinator calculates the digest hash for the data returned from the fastest replica and compares it to the digests returned from the other replicas
 * If the digests are consistent, and the desired consistency level has been met, then the data from the fastest replica can be returned
 * If the digests are not consistent, then the coordinator must perform a read repair
-
+* When the replica node receives the read request, it first checks the row cache. It the row cache contains the data, it is returned immediately
+* If the data is not in row cache, the replica node searches for the data in the memtable & SSTables
+* There is only one memtable per table and hence this part is easy
+* As there can be many SSTables per table and each may contain a portion of the data, Cassandra follows the following approach
+  * Cassandra checks the bloom filter to find out the SSTables that do NOT contain the requested partition
+  * Cassandra checks the key cache to get the offset of the partition key in the SSTable. Key cache is implemented as a map structure in which the keys are a combination of the SSTable file descriptor and partition key and the values are offset locations into SSTable files
+  * If the offset is not obtained from the key cache, Cassandra uses a two-level index stored on disk in order to locate the offset:
+    * The first level index is the partition summary, which is used to obtain an offset for searching for the partition key within the second level index, the partition index
+    * The partition index is where the offset into the SSTable for the partition key is stored
+  * If the offset is obtained, Cassandra reads the data from the SSTable at the specified offset
+  * Once data has been obtained from all of the SSTables, Cassandra merges the SSTable data and memtable data by selecting the value with the latest timestamp for each requested column. Any tombstones are ignored
+  * Finally the merged data can be added to the row cache (if enabled) and returned to the client or coordinator node
 
 ### Write Path
 
