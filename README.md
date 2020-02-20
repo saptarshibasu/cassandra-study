@@ -3,6 +3,21 @@
 **Cassandra Latest Version - 3.11**
 
 - [Cassandra Basics](#cassandra-basics)
+- [Architecture](#architecture)
+  - [Storage](#storage)
+  - [Seed Nodes](#seed-nodes)
+  - [Tomb Stone](#tomb-stone)
+  - [Compaction](#compaction)
+  - [Snitch](#snitch)
+  - [Replication](#replication)
+  - [Partitioner](#partitioner)
+  - [Consistency Level](#consistency-level)
+  - [Read Path](#read-path)
+  - [Write Path](#write-path)
+  - [Failure Detection](#failure-detection)
+  - [Read Repair](#read-repair)
+  - [Anti Entropy Read Repair](#anti-entropy-read-repair)
+- [References](#references)
 
 
 ## Cassandra Basics
@@ -257,26 +272,8 @@
 * Each table has its own Merkle tree which is created during a major compaction
 
 
-## Operations
+## References
 
-The Bloom filter grows to approximately 1-2 GB per billion partitions
-The partition key cache, if enabled, stores a cache of the partition index in off-heap memory
-If a partition key is found in the key cache can go directly to the compression offset map to find the compressed block on disk that has the data
-If a partition key is not found in the key cache, then the partition summary is searched
-The partition summary is an off-heap in-memory structure that stores a sampling of the partition index
-A partition index contains all partition keys, whereas a partition summary samples every X keys, and maps the location of every Xth key's location in the index file
-After finding the range of possible partition key values, the partition index is searched
-The partition index resides on disk and stores an index of all partition keys mapped to their offset
-Using the information found, the partition index now goes to the compression offset map to find the compressed block on disk that has the data. If the partition index must be searched, two seeks to disk will be required to find the desired data
-The compression offset map stores pointers to the exact location on disk that the desired partition data will be found. It is stored in off-heap memory and is accessed by either the partition key cache or the partition index. The desired compressed partition data is fetched from the correct SSTable(s) once the compression offset map identifies the disk location.
-Cassandra extends the concept of eventual consistency by offering tunable consistency
-Write operations will use hinted handoffs to ensure the writes are completed when replicas are down or otherwise not responsive to the write request
-In Cassandra, a write operation is atomic at the partition level
-Cassandra uses client-side timestamps to determine the most recent update to a column
-The latest timestamp always wins when requesting data, so if multiple client sessions update the same columns in a row concurrently, the most recent update is the one seen by readers.
-Cassandra write and delete operations are performed with full row-level isolation. This means that a write to a row within a single partition on a single node is only visible to the client performing the operation – the operation is restricted to this scope until it is complete. All updates in a batch operation belonging to a given partition key have the same restriction
-Consistent hashing allows distribution of data across a cluster to minimize reorganization when nodes are added or removed
-If the table has been configured with the speculative_retry property, the coordinator node for the read request will retry the request with another replica node if the original replica node exceeds a configurable timeout value to complete the read request
-
-
-
+* Carpenter, Jeff; Hewitt, Eben. Cassandra: The Definitive Guide: Distributed Data at Web Scale (Kindle Locations 366-367). O'Reilly Media. Kindle Edition
+* http://cassandra.apache.org/doc/latest/
+* https://docs.datastax.com/en/archived/cassandra/3.0/
