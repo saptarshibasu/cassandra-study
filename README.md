@@ -4,6 +4,10 @@
 
 - [Cassandra Basics](#cassandra-basics)
 - [Architecture](#architecture)
+  - [Secondary Index](#secondary-index)
+  - [Materialized View](#materialized-view)
+  - [Batch](#batch)
+  - [Light Weight Transaction](#light-weight-transaction)
   - [Storage](#storage)
   - [Seed Nodes](#seed-nodes)
   - [Tomb Stone](#tomb-stone)
@@ -15,8 +19,11 @@
   - [Read Path](#read-path)
   - [Write Path](#write-path)
   - [Failure Detection](#failure-detection)
+  - [Hinted Handoff](#hinted-handoff)
   - [Read Repair](#read-repair)
   - [Anti Entropy Read Repair](#anti-entropy-read-repair)
+- [Developer Notes](#developer-notes)
+- [Operations](#operations)
 - [References](#references)
 
 
@@ -24,14 +31,15 @@
 
 * **Composite key** or primary key consists of
   * Partition key - determines the nodes on which the rows are stored. It can be made of multiple columns
-  * Clustering columns (optional) - determine how data is sorted for storage within a partition
+  * Clustering columns (optional) - determine how data is sorted (ascending or descending) for storage within a partition
+* **Primary Key** makes a row unique in the table
 * **Clustering columns** 
-  * guarantee uniqueness
-  * support desired sort ordering
-  * support range queries
+  * guarantee uniqueness for a given row (together with partition key)
+  * support desired sort ordering (ascending or descending)
+  * support range queries (<, <=, >, >=)
 * Each row has a unique value for **Composite key** (Partition key + Clustering columns)
 * Each partition has a unique value for **Partition key**
-* **Static column** - NOT part of the primary key but is shared by every row in the partition
+* **Static column** - NOT part of the primary key but its value is shared by every row in the partition
 * **Column** - name/value pair
 * **Row** - container of columns referenced by a primary key
 * **Table** - container of rows
@@ -39,10 +47,14 @@
 * **Cluster** - container for keyspaces that spans one or more nodes
 * Each write operation generates a timestamp for each column updated. Internally the timesstamp is used for conflict resolution - the last timestamp wins
 * Each column value has a TTL which is null by default (indicating the value will not expire) until set explicitly
-* **Secondary index** 
-  * allows querying data based on columns that are not present in the primary key
-  * for optimal read performance denormalized table designs or materialized views are preferred over secondary indexes
-  * each node needs to maintain its own copy of secondary index based on the data it contains
+* Cassandra attempts to provide atomicity and isolation at the partition level
+* It is normally not possible to query on a column that is not part of the primary key except when
+  * ALLOW FILTERING is used
+  * Secondary index is used
+* If **ALLOW FILTERING** is used to query on a column that is not part of the primary key, Cassandra will ask all the nodes to scan all the SSTables. Therefore, ALLOW FILTERING should be used along with filtering condition on the partition key
+* If an application needs to query on a field that is not a partition key, a common approach is to create a denormalized table with the given column as the partition key. The challenges here is to ensure that all the denormalized table are in sync and consistent with each other. This can be acheived using one of the two approaches:
+  * Materialized View
+  * Batch
 * Joins and referential integrity are not allowed
 * Each table is stored in a separate file on disk and hence it is important to keep the related columns in the same table
 * A query that searches a single partition will give the best performance
@@ -55,11 +67,77 @@
 * Cassandra provides 3 in-built repair mechanisms which are explained in detail in the subsequen sections:
   * Hinted-handoff
   * Read-repair
-  * Anti-entropy node repair
+  * Anti-entropy read repair
 * In Cassandra all writes to SSTables including SSTable compaction are sequential and hence writes perform so well in Cassandra
-* The key values in configurig a cluster are the cluster ame, the partitioner, the snitch, and the seed nodes
+* The key values in configurig a cluster are the 
+  * cluster name
+  * partitioner 
+  * snitch
+  * seed nodes
 
 ## Architecture
+
+### Secondary Index
+
+* Traditional secondary indexes are hidden Cassandra tables. The difference with the regular tables is, the partitions of the hidden table (index table) will not be distributed using the cluster wide partitioner, instead the index data will be colocated with the original data. the key reasons for data co-location are
+  * Reduced index update latency
+  * Reduced the possibility of lost index update
+  * Avoid arbitrary large partitions in the index table
+* Essentially, the secondary index is an inverted index from the indexed column to the partition keys and clustering keys of the original table
+* Filtering using secondary indexed column without any filering condition on partition key will make Cassandra hit every node (at least the ones needed to cover all tokens)
+* Secondary indexes perform well when used to query data along with the partition keys of the original table. This ensures that Cassandra need not go to every node for data
+* Secondary indexes do not perform well with high cardinality or low cardinality columns. When the cardinality is in the middle of two extremes, it gives good result
+* Secondary indexes do not perform well with data that is frequently updated or deleted
+
+### Materialized View
+
+* A materialized view will be created as a cluster wide table. Only different with the normal table is, data cannot be written to the table directly - all writes must be made to the original table
+* A materialized view primary key must contain all the columns that make the primary key of the original table plus the given column (that will be used to query) as the partition key
+* When a source table is updated, the materialized view is updated asynchronously. Therefore, in some edge cases, the delay in the update of materialized view is noticeable
+* If a read repair is triggered while reading from the original table, it will repair both the source table and the materialized view. However, if the read repair is triggered while reading from the materialized view, only the materialized view will be repaired
+* Materialized View update steps:
+  * Optionally create a batchlog at co-ordinator (depending on parameter cassandra.mv_enable_coordinator_batchlog)
+  * Co-ordinator will send the mutation to all the replicas and wait for as many acknowledgements as needed by the consistency level
+  * Each replica will acquire a local lock on the partition where the data need to be inserted / updated / deleted. This is required because Cassandra needs to doa local read before write to get the partition key of the materialized view and therefore other concurrent writes must not interleave
+  * Each replica will doa local read on the partition
+  * Each replica will now create a local batchlog to update the materialized view
+  * Each replica will execute the batchlog asynchronously against a paired materialized view replica with CL=ONE
+  * Each replica applies the mutation locally
+  * Each replica releases its local lock on the partition
+  * If the local mutation is successful, each replica sends an acknowledgement back to the co-ordinator
+  * If the co-ordinator node recieves as many acknowledgement as required by the consistency level, it will return acknowledgement to the client
+  * The co-ordinator log will delete its local batchlog (depending on parameter cassandra.mv_enable_coordinator_batchlog)
+
+### Batch
+
+* Batches are used to atomically execute multiple CQL statements - either all will fail or all will succeed
+* One common use case is to keep multiple denormalized tables containing the same data in sync
+* Batches are by default logged unless all the mutations within a given batch target a single partition
+* Batched mutations on a single partition provide both atommicity  and isolation
+* With batched mutations on more than one partition, we get only atomicity and NOT isolation (which means we may see partial updates at a certain point in time, but all the updates will be eventually made)
+* Batched updates on a single partition is the only scenario where UNLOGGED batch is default and recommended
+* Batched updates on multiple partitions may hit a lot of nodes and therefore should be used with caution
+* The steps of logged batch execution
+  * The co-ordinator node sends a copy of the batch called batchlog to two other nodes for redundance
+  * The co-ordinator node then executes all the statements in the batch
+  * The co-ordinator node deletes the batchlog from all nodes
+  * The co-ordinator node sends acknowledgement to the client
+  * If the co-ordinator node fails while executing the batch, the other nodes holding the batchlog will do the execution. These nodes keep checking every minute for batchlogs that should have been executed
+  * Cassandra uses a grace period from the timestamp on the batch statement equal to twice the value of the write_request_timeout_in_ms property. Any batches that are older than this grace period will be replayed and then deleted from the remaining node
+
+### Light Weight Transaction
+
+* It provides the behaviour called linearizability i.e. no other client can interleave between read and write a.k.a compare and swap
+* Cassandra uses a modefied version of the consensus algorithm called Paxos to implement this feature
+* Cassandra's LWT is limited to a single partition
+* Cassandra stores a Paxos state at each partition, so the transactions on different partitions do not interfare with each other
+* The four steps of the process are:
+  * Prepare / Promise
+  * Read / Results
+  * Propose / Accept
+  * Commit / Ack
+* As it involves the above 4 steps (or 4 round trips), LWT is atleast 4 times slower than a normal execution
+
 
 ### Storage
 
@@ -277,3 +355,5 @@
 * Carpenter, Jeff; Hewitt, Eben. Cassandra: The Definitive Guide: Distributed Data at Web Scale (Kindle Locations 366-367). O'Reilly Media. Kindle Edition
 * http://cassandra.apache.org/doc/latest/
 * https://docs.datastax.com/en/archived/cassandra/3.0/
+* http://www.doanduyhai.com/blog/?p=13191
+* http://www.doanduyhai.com/blog/?p=1930
