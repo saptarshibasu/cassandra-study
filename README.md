@@ -24,6 +24,7 @@
   - [Anti Entropy Read Repair](#anti-entropy-read-repair)
 - [Developer Notes](#developer-notes)
 - [Operations](#operations)
+- [Hardware](#hardware)
 - [References](#references)
 
 
@@ -132,12 +133,11 @@
 * Cassandra's LWT is limited to a single partition
 * Cassandra stores a Paxos state at each partition, so the transactions on different partitions do not interfare with each other
 * The four steps of the process are:
-  * Prepare / Promise
+  * Prepare / Promise - To modify data, a coordinator node can propose a new value to the replica nodes, taking on the role of leader. Other nodes may act as leaders simultaneously for other modifications. Each replica node checks the proposal, and if the proposal is the latest it has seen, it promises to not accept proposals associated with any prior proposals. Each replica node also returns the last proposal it received that is still in progress
   * Read / Results
-  * Propose / Accept
+  * Propose / Accept - If the proposal is approved by a majority of replicas, the leader commits the proposal, but with the caveat that it must first commit any in-progress proposals that preceded its own proposal
   * Commit / Ack
 * As it involves the above 4 steps (or 4 round trips), LWT is atleast 4 times slower than a normal execution
-
 
 ### Storage
 
@@ -172,17 +172,17 @@
 * Compression is enabled by default even though going through the compression offset map consumes CPU resources. Having compression enabled makes the page cache more effective, and typically, almost always pays off
 
 
-| Storage Engine Items   | Storage Type       |
-| ---------------------- | ------------------ |
-| Key Cache              | Heap               |
-| Row Cache              | Off-heap           |
-| Bloom Filter           | Off-heap           |
-| Partition Key Cache    | Off-heap           |
-| Partition Summary      | Off-heap           |
-| Partition Index        | Disk               |
-| Compression Offset Map | Off-heap           |
-| MemTable               | Partially off-heap |
-| SSTable                | Disk               |
+| Storage Engine Items   | Storage Type                      |
+| ---------------------- | --------------------------------- |
+| Key Cache              | Heap                              |
+| Row Cache              | Off-heap                          |
+| Bloom Filter           | Off-heap                          |
+| Partition Key Cache    | Off-heap                          |
+| Partition Summary      | Off-heap                          |
+| Partition Index        | Disk                              |
+| Compression Offset Map | Off-heap                          |
+| MemTable               | Partially or completely off-heap  |
+| SSTable                | Disk                              |
 
 ### Seed Nodes
 
@@ -191,23 +191,24 @@
 ### Tomb Stone
 
 * On deletion, Cassandra marks the data with a **tombstone**
-* **Garbage Collection Grace Seconds** (default values - 10 days) must expire before the compaction process can garbage collect the tobstone and the associated data
+* **Garbage Collection Grace Seconds** (default values - 10 days) must expire before the compaction process can garbage collect the tombstone and the associated data
 * The **Garbage Collection Grace Seconds** setting allows the nodes that failed before receiving the delete operation to recover. Otherwise, the deleted data may resurrect in the node
 * Any node that remains down for **Garbage Collection Grace Seconds** is considered as failed and hence replaced
 * Each table can have its own value for **Garbage Collection Grace Seconds**
 
 ### Compaction
 
-* Compaction is the process of merging **SSTables** for a given table and discard old and obsolete data keeping the data with the ltest timestamp
+* Compaction is the process of merging **SSTables** for a given table and discard old and obsolete data keeping the data with the latest timestamp
 * Once the merge is complete, old **SSTables** are ready to be deleted and are dropped as soon as the pending reads are completed
 * Advantages
   * It frees up disk space by merging multiple SSTables and discarding obsolete date
-  * It improves performance as less dis seek is required to read data
+  * It improves performance as less disk seek is required to read data
 * The merge process doesn't use random I/O  
 * **Compaction Strategies** -
   * **SizeTieredCompactionStrategy (STCS)** - Recommended for write-intensive workloads (default)
   * **LeveledCompactionStrategy (LCS)** - Recommended for read-intensive workloads
   * **TimeWindowCompactionStrategy (TWCS)** - Recommended for time series and expiring TTL workloads
+  * **DateTieredCompactionStrategy** - Stores data written within a certain period of time in the same SSTable
 
 ### Snitch
 
@@ -218,8 +219,10 @@
 * **Dynamic Snitch** - 
   * Enabled by default
   * All snitches use a dynamic snitch layer
-  * Monitors the latency and other factors like whether compactions is currently going on in a node to route away the read requests from poorly performig node
+  * Monitors the latency and other factors like whether compactions is currently going on in a node to route away the read requests from poorly performing node
   * All performance scores determined by the dynamic snitch are reset periodically to give a fresh opportunity to the poorly performing nodes
+* Default Snitch - SimpleSnitch
+* **GossipingPropertyFileSnitch** - Recommended for production. Reads rack and datacenter for the local node in cassandra-rackdc.properties file and propagates these values to other nodes via gossip. For migration from the PropertyFileSnitch, uses the cassandra-topology.properties file if it is present
 
 ### Replication
 
@@ -241,14 +244,14 @@
 * The consistency level defaults to **ONE** for all write and read operations
 * R + W > N = strong consistency , where R = read replica count, W = write replica count, and N = replication factor. All client reads will see the most recent writes
 * **Write Consistency Levels** -
-  * **ALL** -  A write must be written to the commit log and memtable on all replica nodes in the cluster for that partition
-  * **EACH_QUORUM** - A write must be written to the commit log and memtable on a quorum of replica nodes in each datacenter
-  * **QUORUM** -  A write must be written to the commit log and memtable on a quorum of replica nodes across all datacenters.
-  * **LOCAL_QUORUM** - A write must be written to the commit log and memtable on a quorum of replica nodes in the same datacenter as the coordinator
-  * **ONE** - A write must be written to the commit log and memtable of at least one replica node
-  * **TWO** - A write must be written to the commit log and memtable of at least two replica nodes
-  * **THREE** - A write must be written to the commit log and memtable of at least three replica nodes
-  * **LOCAL_ONE** - A write must be sent to, and successfully acknowledged by, at least one replica node in the local datacenter
+  * **ALL** -  A write must be written to the commit log and memtable on **all replica nodes** in the cluster for that partition
+  * **EACH_QUORUM** - A write must be written to the commit log and memtable on a **quorum of replica nodes in each datacenter**
+  * **QUORUM** -  A write must be written to the commit log and memtable on a **quorum of replica nodes across all datacenters**.
+  * **LOCAL_QUORUM** - A write must be written to the commit log and memtable on a **quorum of replica nodes in the same datacenter as the coordinator**
+  * **ONE** - A write must be written to the commit log and memtable of **at least one replica node**
+  * **TWO** - A write must be written to the commit log and memtable of **at least two replica nodes**
+  * **THREE** - A write must be written to the commit log and memtable of **at least three replica nodes**
+  * **LOCAL_ONE** - A write must be sent to, and successfully acknowledged by, **at least one replica node in the local datacenter**
   * **ANY** - A write must be written to at least one node. If all replica nodes for the given partition key are down, the write can still succeed after a hinted handoff has been written. If all replica nodes are down at write time, an ANY write is not readable until the replica nodes for that partition have recovered
 * **Read Consistency Levels**
   * **ALL** - Returns the record after all replicas have responded. The read operation will fail if a replica does not respond
@@ -258,9 +261,9 @@
   * **TWO** - Returns the most recent data from two of the closest replicas
   * **THREE** - Returns the most recent data from three of the closest replicas
   * **LOCAL_ONE** - Returns a response from the closest replica in the local datacenter
-  * **SERIAL** - Allows reading the current (and possibly uncommitted) state of data without proposing a new addition or update. If a SERIAL read finds an uncommitted transaction in progress, it will commit the transaction as part of the read. Similar to QUORUM
-  * **LOCAL_SERIAL** - Same as SERIAL, but confined to the datacenter. Similar to LOCAL_QUORUM
-* A client may connect to any node in the cluster to initiate a read or write query. This node is called a coordinator node
+  * **SERIAL** - Allows reading the current (and possibly uncommitted) state of data without proposing a new addition or update. If a SERIAL read finds an uncommitted transaction in progress, it will commit the transaction as part of the read. Similar to QUORUM (Used with LWT)
+  * **LOCAL_SERIAL** - Same as SERIAL, but confined to the datacenter. Similar to LOCAL_QUORUM (Used with LWT)
+* A client may connect to any node in the cluster to initiate a read or write query. This node is called a **coordinator node**
 * If a replica is not available at the time of write, the coordinator node can store a hint such that when the replica node becomes available, and the coordinator node comes to know about it through gossip, it will send the write to the replica. This is called **hinted-handoff**
 * Hints do not count as writes for the purpose of consistency level except the consistency level of ANY. This behaviour of ANY is also known as **Sloppy Quorum**
 * The coordinator node contacted by the client application forwards the write request to one replica in each of the other datacenters, with a special tag to forward the write to the other local replicas
@@ -286,7 +289,7 @@
 * If the data is not in row cache, the replica node searches for the data in the memtable & SSTables
 * There is only one memtable per table and hence this part is easy
 * As there can be many SSTables per table and each may contain a portion of the data, Cassandra follows the following approach
-  * Cassandra checks the bloom filter to find out the SSTables that do NOT contain the requested partition
+  * Cassandra checks the bloom filter of each SSTable to find out the SSTables that do NOT contain the requested partition
   * Cassandra checks the key cache to get the offset of the partition key in the SSTable. Key cache is implemented as a map structure in which the keys are a combination of the SSTable file descriptor and partition key and the values are offset locations into SSTable files
   * If the partition key is found in the partition cache, Cassandra directly goes the compression offset map to locate the data on disk
   * If the offset is not obtained from the key cache, Cassandra uses a two-level index stored on disk in order to locate the offset:
@@ -311,7 +314,7 @@
 * Once a sufficient number of replicas have responded to satisfy the consistency level, the coordinator acknowledges the write to the client
 * If a replica doesn't respond within the timeout, it is presumed to be dead and a hint is stored for the write
 * A hint doesn't count as a succesful replica write, unless the consistency level is ANY
-* As the replica node receives the write request, it immediately writes the data to the commit log
+* As the replica node receives the write request, it immediately writes the data to the commit log. By default, commit log is uncompressed
 * Next the replica node writes the data to a memtable
 * If the row caching is used and the row is in the cache, it is invalidated
 * If the write causes either the commit log or memtable to pass their maximum thresholds, a flush is scheduled to run
@@ -321,7 +324,7 @@
 ### Failure Detection
 
 * Cassandra uses Gossip protocol for failure detection. The nodes exchange information about themselves and about the other nodes that they have gossiped about, so all nodes quickly learn about all other nodes in the cluster
-  * Once per second, the gossipier will choose a random node in the cluster and initialize a gozzip session with it
+  * Once per second, the gossipier will choose a random node in the cluster and initialize a gossip session with it
   * Each round of gossip requires 3 messages
   * The gossip initiator sends its chosen friend a GossipDigestSynMessage
   * When the friend receives this message, it returns a GossipDigestAckMessage
@@ -342,13 +345,72 @@
 * The read repair may be performed either before or after the return to the client
 * If one of the two stronger consistency levels (QUORUM & ALL) is used, the read repair happens before the data is returned to the client
 * If a weaker consistency level is used like ONE, the read repair is optionally performed in the background after returning the data to the client
+* The percentage of reads that result in background repairs for a given table is determined by the `read_repair_chance` and `dc_local_read_repair_chance` options for the table
 
 ### Anti Entropy Node Repair
 
 * Anti Entropy Repair is a manually initiated repair operation performed as a part of regular maintenance process
 * It is based on Merkle tree
 * Each table has its own Merkle tree which is created during a major compaction
+* It is a manually initiated operation
+* It first initiates a validation compaction process which creates a Merkle tree for each table and exchanges the tree with the neighbouring nodes for comparion
+* Thw tree is kept only as long as it is needed to share the tree with the neighbouring trees in the ring
+* The advantage of Merkle tree is, it causes much less network traffic for transmission
 
+## Developer Notes
+
+* Keyspace level configurations
+  * Replication Factor
+  * Replication Strategy
+  * Durable Writes (Default value - true, enables writing to commit log)
+* Key table level configurations
+  * Compression - (Default value - LZ4)
+  * Cdc (Change Data Capture)
+  * gc_grace_seconds (Default value - 10 days)
+  * Compaction strategies
+  * Read repairs
+  * Speculative Retry
+  * Caching (keys and rows)
+  * Bloom filter false positive rate
+* Using network storage like SAN & NAS are strongly discouraged for storage and considered **anti-patterns**
+* **Key Data Types**
+  * tinyint (1 byte), smallint (2 byte), int (32 bit signed), bigint (64 bit signed), varint (arbitrary precision integer - Java BigInteger)
+  * float (32-bit IEEE-754), double (64-bit IEEE-754), decimal (variable precision decimal)
+  * text, varchar (UTF8 encoded strings)
+  * set, map (In general, use set instead of list)
+  * uuid (Version 4), timeuuid (Version 1) - good for surrogate key
+  * timestamp (Date and time with millisecond precision, encoded as 8 bytes since epoch), time (Value is encoded as a 64-bit signed integer representing the number of nanoseconds since midnight), date (Value is a date with no corresponding time value; Cassandra encodes date as a 32-bit integer representing days since epoch (January 1, 1970))
+  * inet (IP address string in IPv4 or IPv6 format)
+  * blob (Arbitrary bytes (no validation))
+  * counter (Distributed counter)
+  * boolean
+* frozen (UDT or collections) - A frozen value serializes multiple components into a single value. Non-frozen types allow updates to individual fields. Cassandra treats the value of a frozen type as a blob. The entire value must be overwritten.
+
+
+## Operations
+
+* Trigerring Auto Entropy repair - `nodetool repai`
+
+## Hardware
+
+* **Generic Guidelines**
+  * The more memory a DataStax Enterprise (DSE) node has, the better read performance. More RAM also allows memory tables (memtables) to hold more recently written data. Larger memtables lead to a fewer number of SSTables being flushed to disk, more data held in the operating system page cache, and fewer files to scan from disk during a read. The ideal amount of RAM depends on the anticipated size of your hot data
+  * Insert-heavy workloads are CPU-bound in DSE before becoming memory-bound. All writes go to the commit log, but the database is so efficient in writing that the CPU is the limiting factor. The DataStax database is highly concurrent and uses as many CPU cores as available
+  * SSDs are recommended for all DataStax Enterprise nodes. The NAND Flash chips that power SSDs provide extremely low-latency response times for random reads while supplying ample sequential write performance for compaction operations
+  * DataStax recommends binding your interfaces to separate Network Interface Cards (NIC). You can use public or private NICs depending on your requirements
+  * DataStax recommends using at least two disks per node: one for the commit log and the other for the data directories. At a minimum, the commit log should be on its own partition.
+  * DataStax recommends deploying on XFS or ext4. On ext2 or ext3, the maximum file size is 2TB even using a 64-bit kernel. On ext4 it is 16TB
+  * Partition Size - a good rule of thumb is to keep the maximum number of rows below 100,000 items and the disk size under 100 MB
+  * As a production best practice, use RAID 0 and SSDs
+
+* **Production Recommended Values**
+  * System Memory - 32GB per node (transactional)
+  * Heap - 8GB
+  * CPU - 16 core
+  * Disk - RAID 0 SSD
+  * File System - XFS
+  * Network Bandwidth (Min) - 1000 MB/s
+  * Partition Size (Max) - 100 MB (100,000 rows)
 
 ## References
 
@@ -357,3 +419,4 @@
 * https://docs.datastax.com/en/archived/cassandra/3.0/
 * http://www.doanduyhai.com/blog/?p=13191
 * http://www.doanduyhai.com/blog/?p=1930
+* https://docs.datastax.com/en/dse-planning/doc/planning/capacityPlanning.html
