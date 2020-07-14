@@ -266,6 +266,7 @@
   * **SERIAL** - Allows reading the current (and possibly uncommitted) state of data without proposing a new addition or update. If a SERIAL read finds an uncommitted transaction in progress, it will commit the transaction as part of the read. Similar to QUORUM (Used with LWT)
   * **LOCAL_SERIAL** - Same as SERIAL, but confined to the datacenter. Similar to LOCAL_QUORUM (Used with LWT)
 * The most commonly used CL are: ONE, QUORUM, LOCAL_QUORUM. ONE is useful for IoT use cases where some inconsistencies or delay can be accomodated
+* Regardless of the consistency level, a write will be sent to all nodes. CL is just about the nodes whose acknowledgement is needed before acknowledging the client
 * A client may connect to any node in the cluster to initiate a read or write query. This node is called a **coordinator node**
 * If a replica is not available at the time of write, the coordinator node can store a hint such that when the replica node becomes available, and the coordinator node comes to know about it through gossip, it will send the write to the replica. This is called **hinted-handoff**
 * Hints do not count as writes for the purpose of consistency level except the consistency level of ANY. This behaviour of ANY is also known as **Sloppy Quorum**
