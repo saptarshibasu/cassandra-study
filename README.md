@@ -187,6 +187,8 @@
 ### Seed Nodes
 
 * When new nodes in a cluster come online, seed nodes are their contact points for learning the cluster topology. This process is called **auto bootstrapping**
+* In multiple data-center clusters, include at least one node from each datacenter (replication group) in the seed list. Designating more than a single seed node per datacenter is recommended for fault tolerance. Otherwise, gossip has to communicate with another datacenter when bootstrapping a node
+* Making every node a seed node is not recommended because of increased maintenance and reduced gossip performance. Gossip optimization is not critical, but it is recommended to use a small seed list (approximately three nodes per datacenter)
 
 ### Tomb Stone
 
@@ -222,7 +224,7 @@
   * Monitors the latency and other factors like whether compactions is currently going on in a node to route away the read requests from poorly performing node
   * All performance scores determined by the dynamic snitch are reset periodically to give a fresh opportunity to the poorly performing nodes
 * Default Snitch - SimpleSnitch
-* **GossipingPropertyFileSnitch** - Recommended for production. Reads rack and datacenter for the local node in cassandra-rackdc.properties file and propagates these values to other nodes via gossip. For migration from the PropertyFileSnitch, uses the cassandra-topology.properties file if it is present
+* **GossipingPropertyFileSnitch** - Recommended for production. Reads rack and datacenter for the local node in cassandra-rackdc.properties file and propagates these values to other nodes via gossip. Here the rack and data center information of the node is configured in the file `cassandra-rackdc.properties`
 
 ### Replication
 
@@ -257,20 +259,22 @@
   * **ALL** - Returns the record after all replicas have responded. The read operation will fail if a replica does not respond
   * **QUORUM** - Returns the record after a quorum of replicas from all datacenters has responded
   * **LOCAL_QUORUM** - Returns the record after a quorum of replicas in the current datacenter as the coordinator has reported
-  * **ONE** - Returns a response from the closest replica, as determined by the snitch. By default, a read repair runs in the background to make the other replicas consistent
+  * **ONE** - Returns a response from the closest replica, as determined by the snitch
   * **TWO** - Returns the most recent data from two of the closest replicas
   * **THREE** - Returns the most recent data from three of the closest replicas
   * **LOCAL_ONE** - Returns a response from the closest replica in the local datacenter
   * **SERIAL** - Allows reading the current (and possibly uncommitted) state of data without proposing a new addition or update. If a SERIAL read finds an uncommitted transaction in progress, it will commit the transaction as part of the read. Similar to QUORUM (Used with LWT)
   * **LOCAL_SERIAL** - Same as SERIAL, but confined to the datacenter. Similar to LOCAL_QUORUM (Used with LWT)
+* The most commonly used CL are: ONE, QUORUM, LOCAL_QUORUM. ONE is useful for IoT use cases where some inconsistencies or delay can be accomodated
 * A client may connect to any node in the cluster to initiate a read or write query. This node is called a **coordinator node**
 * If a replica is not available at the time of write, the coordinator node can store a hint such that when the replica node becomes available, and the coordinator node comes to know about it through gossip, it will send the write to the replica. This is called **hinted-handoff**
 * Hints do not count as writes for the purpose of consistency level except the consistency level of ANY. This behaviour of ANY is also known as **Sloppy Quorum**
-* The coordinator node contacted by the client application forwards the write request to one replica in each of the other datacenters, with a special tag to forward the write to the other local replicas
+* **Limitations of hinted-handoff** - If a node remains down for quite some time, hints can build up and then overwhelming the node when it is back online. Hence hints are stored for a certain time window only and it can be disabled
+* New hints will be retained for up to `max_hint_window_in_ms` of downtime (defaults to 3 hours)
+* In a multi data-center deployment, the coordinator node contacted by the client application forwards the write request to one replica in each of the other datacenters, with a special tag to forward the write to the other local replicas
 * If the coordinator cannot write to enough replicas to meet the requested consistency level, it throws an Unavailable Exception and does not perform any writes
 * **SERIAL** & **LOCAL_SERIAL** (equivalent to QUORUM & LOCAL_QUORUM respectively) consistency modes are for use with lightweight transaction
 * If there are enough replicas available but the required writes don't finish within the timeout window, the coordinator throws a Timeout Exception
-* **Limitations of hinted-handoff** - If a node remains down for quite some time, hints can build up and then overwhelming the node when it is back online. Hence hints are stored for a certain time window only and it can be disabled
 
 ### Read Path
 
@@ -332,20 +336,26 @@
   * When the gossipier determines that another endpoint is dead, it "convicts" that endpoint by marking it as dead in its local list and logging the fact
   * A gossip message has a version associated with it, so that during a gossip exchange, older information is overwritten with the most current state for a particular node
 * Each node keeps track of the state of other nodes in the cluster by means of an accrual failure detector (or phi failure detector). This detector evaluates the health of other nodes based on a sliding window of gossip
-* Making every node a seed node is not recommended because of increased maintenance and reduced gossip performance. Gossip optimization is not critical, but it is recommended to use a small seed list (approximately three nodes per datacenter)
 
 ### Read Repair
 
-* The coordinator makes a full read request from all the replica nodes
-* The coordinator merges the data by selecting a value for each requested column
-* It compares the values returned from the replicas and returns the value that has the latest timestamp
-* If Cassandra finds different values stored with the same timestamp, it will compare the values lexicographically and choose the one that has the greater value
-* The merged data is then returned to the client
-* Asnchronously, the coordinator identifies any replicas that return obsolete data and issues a read repair request to each of these replicas to update their data based on the merged data
-* The read repair may be performed either before or after the return to the client
-* If one of the two stronger consistency levels (QUORUM & ALL) is used, the read repair happens before the data is returned to the client
-* If a weaker consistency level is used like ONE, the read repair is optionally performed in the background after returning the data to the client
-* The percentage of reads that result in background repairs for a given table is determined by the `read_repair_chance` and `dc_local_read_repair_chance` options for the table
+* Two types of read repair
+  * Blocking / Foreground - the repair is done to the nodes involved in the read before sending out the data to the client. The client will always receive the repaired data
+  * Non-Blocking / Background - the repair is done globally for all nodes asynchronously after the response is returned to the client. The client will receive the unrepaired data
+* Steps of blocking / foreground read repair
+  * The client sends the read request to the co-ordinator node
+  * The co-ordinator node sends a full data request to the fastest node as determined by the snitch
+  * If the CL is more than ONE, the co-ordinator needs to send the read request to more nodes to satisfy the CL. The co-ordinator nodes send a digest request to these nodes
+  * The co-ordinator calculates the digest of the data returned by the 1st node and compares it with the digests returned by the other nodes
+  * If the digests are inconsistent, the co-ordinator will initiate a full data request to all the nodes that returned digests earlier
+  * The co-ordinator then assembles a new record by picking the latest value of each column based on timestamp
+  * The assembled repaired record is now written to the nodes involved in the read
+  * Finally, the returned data is returned to the client
+* Note, if the CL is ONE, no blocking repair will take place as there is nothing to compare because only one node is involved
+* The background repairs happen based on the following settings at the table level: `read_repair_chance` and `dc_local_read_repair_chance`
+  * A random number is generated between 0.0 and 1.0
+  * If the generated number is less than or equal to the number specified in `read_repair_chance` or `dc_local_read_repair_chance`, a full read repair will be triggered in the background
+* For tables using either DTCS or TWCS, set both chance read repair parameters on those tables to 0.0 as read repair could inject out-of-sequence timestamps
 
 ### Anti Entropy Node Repair
 
@@ -420,3 +430,4 @@
 * http://www.doanduyhai.com/blog/?p=13191
 * http://www.doanduyhai.com/blog/?p=1930
 * https://docs.datastax.com/en/dse-planning/doc/planning/capacityPlanning.html
+* https://academy.datastax.com/support-blog/read-repair
