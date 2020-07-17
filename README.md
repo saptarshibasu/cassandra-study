@@ -395,7 +395,49 @@
   * blob (Arbitrary bytes (no validation))
   * counter (Distributed counter)
   * boolean
-* frozen (UDT or collections) - A frozen value serializes multiple components into a single value. Non-frozen types allow updates to individual fields. Cassandra treats the value of a frozen type as a blob. The entire value must be overwritten.
+* frozen (UDT or collections) - A frozen value serializes multiple components into a single value. Non-frozen types allow updates to individual fields. Cassandra treats the value of a frozen type as a blob. The entire value must be overwritten
+* Counter
+  * Counter data type is a 64-bit integer value
+  * A counter can only be incremented or decremented. It's value cannot be set
+  * A counter column cannot be part of the primary key
+  * A counter column must have a dedicated table that contains only the primary key and the counter column
+  * Index cannot be created on counter
+  * The counter value cannot be expired using TTL
+  * Cassandra 2.1 introduces a new form of cache, counter cache, to keep hot counter values performant
+* Cassandra will not allow a part of a primary key to hold a null value. While Cassandra will allow you to create a secondary index on a column containing null values, it still won't allow you to query for those null values
+* Inserting an explicit null value creates a tombstone which consumes space and impacts performance. It is, however, okay to skip a column during insertion if the column doesn't have any value for that entry
+* Date time functions
+
+| Function Name          | Output Type     |
+| ---------------------- | --------------- |
+| currentTimestamp()     | timestamp       |
+| currentDate()          | datetime        |
+| currentTime()          | time            |
+| currentTimeUUID        | timeUUID        |
+
+* UUID functions
+
+| Function Name               | Output Type               |
+| --------------------------- | ------------------------- |
+| uuid()                      | uuid                      |
+| now()                       | timeuuid                  |
+| toDate(timeuuid)            | to date YYYY-MM-DD format |
+| toTimestamp(timeuuid)       | to timestamp format       |
+| toUnixTimestamp(timeuuid)   | to UNIX timestamp format  |
+| toDate(timestamp)           | to date YYYY-MM-DD format |
+| toUnixTimestamp(timestamp)  | to UNIX timestamp format  |
+| toTimestamp(date)           | to timestamp format       |
+| toUnixTimestamp(date)       | to UNIX timestamp format  |
+| dateOf(timeuuid)            | to date format            |
+| unixTimestampOf(timeuuid)   | to UNIX timestamp format  |
+
+* Time range query on a timeuuid field
+
+```
+SELECT * FROM myTable
+   WHERE t > maxTimeuuid('2013-01-01 00:05+0000')
+   AND t < minTimeuuid('2013-02-02 10:00+0000')
+```
 
 
 ## Operations
