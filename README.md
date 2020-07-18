@@ -4,6 +4,7 @@
 
 - [Cassandra Basics](#cassandra-basics)
 - [Architecture](#architecture)
+  - [Vnodes](#vnodes)
   - [Secondary Index](#secondary-index)
   - [Materialized View](#materialized-view)
   - [Batch](#batch)
@@ -77,6 +78,14 @@
   * seed nodes
 
 ## Architecture
+
+### Vnodes
+
+* Tokens are automatically calculated and assigned to each node
+* Rebalancing a cluster is automatically accomplished when adding or removing nodes. When a node joins the cluster, it assumes responsibility for an even portion of data from the other nodes in the cluster. If a node fails, the load is spread evenly across other nodes in the cluster
+* Rebuilding a dead node is faster because it involves every other node in the cluster
+* The proportion of vnodes assigned to each machine in a cluster can be assigned, so smaller and larger computers can be used in building a cluster 
+* `num_tokens` parameter is used to set the number of vnodes in a node. Default valu - 1 (vnode disables). Possible values - 2 to 128
 
 ### Secondary Index
 
@@ -439,10 +448,16 @@ SELECT * FROM myTable
    AND t < minTimeuuid('2013-02-02 10:00+0000')
 ```
 
+* Key CSQL shell commands
+  * **CONSISTENCY** - Sets the consistency level for CQL commands. SERIAL & LOCAL_SERIAL settings suport only read transactions
+  * **COPY** - Imports and exports CSV data
+  * **DESCRIBE** - Provides information about the connected Cassandra cluster and objects within the cluster
+  * **SERIAL CONSISTENCY** - Sets consistency for lightweight transactions (LWT)
+  * **SOURCE** - Executes a file containing CQL statements
 
 ## Operations
 
-* Trigerring Auto Entropy repair - `nodetool repai`
+* Trigerring Auto Entropy repair - `nodetool repair`
 
 ## Hardware
 
