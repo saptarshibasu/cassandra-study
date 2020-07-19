@@ -85,7 +85,7 @@
 * Rebalancing a cluster is automatically accomplished when adding or removing nodes. When a node joins the cluster, it assumes responsibility for an even portion of data from the other nodes in the cluster. If a node fails, the load is spread evenly across other nodes in the cluster
 * Rebuilding a dead node is faster because it involves every other node in the cluster
 * The proportion of vnodes assigned to each machine in a cluster can be assigned, so smaller and larger computers can be used in building a cluster 
-* `num_tokens` parameter is used to set the number of vnodes in a node. Default valu - 1 (vnode disables). Possible values - 2 to 128
+* `num_tokens` parameter is used to set the number of vnodes in a node. Possible values - 2 to 128
 
 ### Secondary Index
 
@@ -121,12 +121,14 @@
 ### Batch
 
 * Batches are used to atomically execute multiple CQL statements - either all will fail or all will succeed
+* Only modification statements (INSERT, UPDATE, or DELETE) may be included in a batch
 * One common use case is to keep multiple denormalized tables containing the same data in sync
 * Batches are by default logged unless all the mutations within a given batch target a single partition
 * Batched mutations on a single partition provide both atommicity  and isolation
 * With batched mutations on more than one partition, we get only atomicity and NOT isolation (which means we may see partial updates at a certain point in time, but all the updates will be eventually made)
 * Batched updates on a single partition is the only scenario where UNLOGGED batch is default and recommended
 * Batched updates on multiple partitions may hit a lot of nodes and therefore should be used with caution
+* Counter modifications are only allowed within a special form of batch known as a counter batch. A counter batch can only contain counter modifications.
 * The steps of logged batch execution
   * The co-ordinator node sends a copy of the batch called batchlog to two other nodes for redundance
   * The co-ordinator node then executes all the statements in the batch
@@ -134,6 +136,9 @@
   * The co-ordinator node sends acknowledgement to the client
   * If the co-ordinator node fails while executing the batch, the other nodes holding the batchlog will do the execution. These nodes keep checking every minute for batchlogs that should have been executed
   * Cassandra uses a grace period from the timestamp on the batch statement equal to twice the value of the write_request_timeout_in_ms property. Any batches that are older than this grace period will be replayed and then deleted from the remaining node
+  * A batch containing conditional updates can only operate within a single partition
+  * If one statement in a batch is a conditional update, the conditional logic must return true, or the entire batch fails
+  * If the batch contains two or more conditional updates, all the conditions must return true, or the entire batch fails
 
 ### Light Weight Transaction
 
@@ -156,8 +161,8 @@
 * If a node stops working, **commit log** is replayed to restore the last state of the **memtables**
 * To reduce the **commit log** replay time, the recommended best practice is to flush the **memtables** before restarting the nodes
 * `commitlog_sync` setting determines when the data on the commitlog will be `fsync`ed to the disk. Possible values:
-  * `batch` (default) - Cassandra won’t ack writes to the clients until the commit log has been `fsync`ed to the disk. It will wait `commitlog_sync_batch_window_in_ms` milliseconds between `fsync`s. Default value is 2 milliseconds
-  * `periodic` - Writes are immediately ack’ed to the clients, and the Commitlog is simply synced every `commitlog_sync_period_in_ms` milliseconds. Default value is 10 seconds
+  * `batch` - Cassandra won’t ack writes to the clients until the commit log has been `fsync`ed to the disk. It will wait `commitlog_sync_batch_window_in_ms` milliseconds between `fsync`s. Default value is 2 milliseconds
+  * `periodic` (default) - Writes are immediately ack’ed to the clients, and the Commitlog is simply synced every `commitlog_sync_period_in_ms` milliseconds. Default value is 10 seconds
 * **Commit logs** should go in a separate device in `batch` mode
 * **Memtables** are automatically flushed to **SSTables** in two scenarios
   * The memory usage exceeds a configurable limit. The **memtable** is written out to a new **SSTable**
@@ -405,16 +410,24 @@
   * counter (Distributed counter)
   * boolean
 * frozen (UDT or collections) - A frozen value serializes multiple components into a single value. Non-frozen types allow updates to individual fields. Cassandra treats the value of a frozen type as a blob. The entire value must be overwritten
-* Counter
+* Non-frozen collections are not allowed inside collections and UDT is also considered a collection here. Therefore, the following CQL will throw error:
+```
+ALTER TABLE user ADD addresses map<text, address>; // It will throw error
+```
+* A collection can also be used as a primary key, if it is frozen
+* **Counter**
   * Counter data type is a 64-bit integer value
   * A counter can only be incremented or decremented. It's value cannot be set
+  * There is no operation to reset a counter directly, but you can approximate a reset by reading the counter value and decrementing by that value
   * A counter column cannot be part of the primary key
-  * A counter column must have a dedicated table that contains only the primary key and the counter column
+  * If a counter is used, all of the columns other than primary key columns must be counters
   * Index cannot be created on counter
   * The counter value cannot be expired using TTL
   * Cassandra 2.1 introduces a new form of cache, counter cache, to keep hot counter values performant
+  * Counter updates are not idempotent
 * Cassandra will not allow a part of a primary key to hold a null value. While Cassandra will allow you to create a secondary index on a column containing null values, it still won't allow you to query for those null values
 * Inserting an explicit null value creates a tombstone which consumes space and impacts performance. It is, however, okay to skip a column during insertion if the column doesn't have any value for that entry
+* User defined functions can be written in: Java, Javascript, Ruby, Python, Scala
 * Date time functions
 
 | Function Name          | Output Type     |
@@ -451,13 +464,14 @@ SELECT * FROM myTable
 * Key CSQL shell commands
   * **CONSISTENCY** - Sets the consistency level for CQL commands. SERIAL & LOCAL_SERIAL settings suport only read transactions
   * **COPY** - Imports and exports CSV data
-  * **DESCRIBE** - Provides information about the connected Cassandra cluster and objects within the cluster
+  * **DESCRIBE** - Provides information about the connected Cassandra cluster and objects within the cluster (SCHEMA, CLUSTER, KEYSPACE, TABLE, INDEX, MATERIALIZED VIEW, TYPE, FUNCTION, AGGREGATE)
   * **SERIAL CONSISTENCY** - Sets consistency for lightweight transactions (LWT)
   * **SOURCE** - Executes a file containing CQL statements
 
 ## Operations
 
 * Trigerring Auto Entropy repair - `nodetool repair`
+* Calculating Partition Size - `No. of rows * (No. of columns - No. of primary key columns - No. of static columns) + No. of static columns`
 
 ## Hardware
 
@@ -468,7 +482,7 @@ SELECT * FROM myTable
   * DataStax recommends binding your interfaces to separate Network Interface Cards (NIC). You can use public or private NICs depending on your requirements
   * DataStax recommends using at least two disks per node: one for the commit log and the other for the data directories. At a minimum, the commit log should be on its own partition.
   * DataStax recommends deploying on XFS or ext4. On ext2 or ext3, the maximum file size is 2TB even using a 64-bit kernel. On ext4 it is 16TB
-  * Partition Size - a good rule of thumb is to keep the maximum number of rows below 100,000 items and the disk size under 100 MB
+  * Partition Size - a good rule of thumb is to keep the maximum number of cells below 100,000 items and the disk size under 100 MB
   * As a production best practice, use RAID 0 and SSDs
 
 * **Production Recommended Values**
